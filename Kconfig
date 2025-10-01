@@ -1,3 +1,15 @@
 menu "Zephyr"
 source "Kconfig.zephyr"
 endmenu
+
+menu "Atividade 1"
+
+    config TIMER_INTERVALO
+    int "Intervalo do timer em milissegundos."
+    default 1000
+      
+endmenu
+
+module = ATIVIDADE1
+module-str = atividade1
+source "subsys/logging/Kconfig.template.log_config"
