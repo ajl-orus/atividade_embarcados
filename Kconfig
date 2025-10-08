@@ -1,3 +1,19 @@
 menu "Zephyr"
 source "Kconfig.zephyr"
 endmenu
+
+menu "AIVIDADE 2"
+
+config BLINK_TIME
+    int "time to the led stay blink (milliscond)"
+    default 500
+
+config PERIOD
+    int "perod of signal PWM  (microscond)"
+    default 1000
+
+endmenu
+
+module = MAIN
+module-str = MAIN
+source "subsys/logging/Kconfig.template.log_config"
