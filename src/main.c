@@ -40,7 +40,6 @@ void set_led_brightness(uint8_t duty_percent)
     k_msleep(low_time);
 }
 
-
 int main(void)
 {
     int ret;
@@ -56,13 +55,6 @@ int main(void)
         return 0;
     }
 
-    ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT);
-	if (ret != 0) {
-		LOG_ERR("Error %d: failed to configure led pin %d\n",
-		       ret, led.pin);
-		return 0;
-	}
-
     ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
 	if (ret != 0) {
 		LOG_ERR("Error %d: failed to configure %s pin %d\n",
@@ -70,12 +62,12 @@ int main(void)
 		return 0;
 	}
 
-	// ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
-	// if (ret != 0) {
-	// 	LOG_ERR("Error %d: failed to configure interrupt on %s pin %d\n",
-	// 		ret, button.port->name, button.pin);
-	// 	return 0;
-	// }
+	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
+	if (ret != 0) {
+		LOG_ERR("Error %d: failed to configure interrupt on %s pin %d\n",
+			ret, button.port->name, button.pin);
+		return 0;
+	}
 
     gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
 	gpio_add_callback(button.port, &button_cb_data);
@@ -98,15 +90,12 @@ int main(void)
         return 0;
     } 
 
-    LOG_INF("ANTES DO WHILE");
-
     while(true) {
         if (mode){
-            k_msleep(CONFIG_BLINK_TIME+1000);
+            k_msleep(CONFIG_BLINK_TIME);
             gpio_pin_toggle_dt(&led);
             continue;
         }
-        LOG_INF("ELSE");
         set_led_brightness(brightness);
 
         brightness += step;
@@ -114,7 +103,7 @@ int main(void)
             step = -step;
         }
 
-        LOG_INF("Brilho: %d\n", brightness);
+        k_msleep(500);
     }
 
     return 0;
