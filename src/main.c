@@ -1,110 +1,122 @@
-#include <stdbool.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/drivers/gpio.h>
+#include <zephyr/gpio.h>
 
-LOG_MODULE_REGISTER(main, CONFIG_MAIN_LOG_LEVEL); 
+LOG_MODULE_REGISTER(main, CONFIG_MAIN_LOG_LEVEL);
 
-#define LED_NODE DT_ALIAS(led0)
-#define SW0_NODE DT_ALIAS(sw0)
-
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
-static const struct gpio_dt_spec button   = GPIO_DT_SPEC_GET(SW0_NODE, gpios);
-
-
-static struct gpio_callback button_cb_data;
-
-static bool mode = false;
-static uint8_t brightness;
-static int8_t step = 5;
-
-
-static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins) {
-    mode = !mode;
-    brightness = 0;
-    step = 5;
-}
-
-void set_led_brightness(uint8_t duty_percent)
+struct sensor_data
 {
-    uint32_t high_time = (CONFIG_PERIOD * duty_percent) / 100;
-    uint32_t low_time = CONFIG_PERIOD - high_time;
+    double temperature;
+    double humidity;
+};
 
-    gpio_pin_set_dt(&led, 1);
-    k_msleep(high_time);
+K_MSGQ_DEFINE(filter_input_msgq, sizeof(struct sensor_data), 10, 1);
+K_MSGQ_DEFINE(filter_output_msgq, sizeof(struct sensor_data), 10, 1);
 
-    gpio_pin_set_dt(&led, 0);
-    k_msleep(low_time);
+/**
+ * Simulate reading temperature and humidity from sensors.
+ */
+double read_temperature()
+{
+    return 10.0 + (rand() % 100) / 10.0; 
 }
+
+/**
+ * Simulate reading humidity from a sensor.
+ */
+double read_humidity()
+{
+    return 10.0 + (rand() % 100) / 10.0; 
+}
+
+/**
+ * Threads for reading temperature sensors and filtering data.
+ */
+void temperature_sensor(void *p1, void *p2, void *p3)
+{
+    struct sensor_data data;
+    while (1) {
+        LOG_DBG("Reading temperature sensor...");
+        data.temperature = read_temperature();
+        data.humidity = NULL;
+
+        while(k_msgq_put(&filter_input_msgq, &data, K_MSEC(100)) != 0) {
+            LOG_WRN("Filter input message queue full, dropping data");
+            k_msgq_purge(&filter_input_msgq);
+        }
+
+        k_sleep(K_SECONDS(1));
+    }
+}
+
+/**
+ * Threads for reading humidity sensors and filtering data.
+ */
+void humidity_sensor(void *p1, void *p2, void *p3)
+{
+    struct sensor_data data;
+    while (1) {
+        LOG_DBG("Reading humidity sensor...");
+        data.humidity = read_humidity();
+        data.temperature = NULL;
+
+        while(k_msgq_put(&filter_input_msgq, &data, K_MSEC(100)) != 0) {
+            LOG_WRN("Filter input message queue full, dropping data");
+            k_msgq_purge(&filter_input_msgq);
+        }
+
+        k_sleep(K_SECONDS(1));
+    }
+}
+
+/**
+ * Thread for filtering sensors data.
+ */
+void filter_data(void *p1, void *p2, void *p3)
+{
+    struct sensor_data data;
+
+    while (1) {
+        LOG_DBG("Filtering data...");
+
+        k_msgq_get(&filter_input_msgq, &data, K_FOREVER);
+
+        if(data.temperature == NULL && data.humidity == NULL) {
+            LOG_WRN("Received data with no valid fields, dropping");
+            k_msgq_purge(&filter_input_msgq);
+            continue;
+        }
+
+        if(data.temperature != NULL) {
+            if(data.temperature <= 18.0 || data.temperature >= 30.0) {
+                LOG_WRN("Temperature out of range: %f", data.temperature);
+                continue;
+            }
+        }
+
+        if(data.humidity != NULL) {
+            if(data.humidity <= 40.0 || data.humidity >= 70.0) {
+                LOG_WRN("Humidity out of range: %f", data.humidity);
+                continue;
+            }
+        }
+
+        while(k_msgq_put(&filter_output_msgq, &data, K_MSEC(100)) != 0) {
+            LOG_WRN("Filter output message queue full, dropping data");
+            k_msgq_purge(&filter_output_msgq);
+        }
+
+        k_sleep(K_SECONDS(1));
+    }
+}
+
 
 int main(void)
 {
-    int ret;
-
-    /*
-    *
-    * Configure the button to work with edge rising like input
-    *
-    */
-
-    if(!gpio_is_ready_dt(&button)) {
-        LOG_ERR("GPIOS not suported!");
-        return 0;
-    }
-
-    ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
-	if (ret != 0) {
-		LOG_ERR("Error %d: failed to configure %s pin %d\n",
-		       ret, button.port->name, button.pin);
-		return 0;
-	}
-
-	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
-	if (ret != 0) {
-		LOG_ERR("Error %d: failed to configure interrupt on %s pin %d\n",
-			ret, button.port->name, button.pin);
-		return 0;
-	}
-
-    gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
-	gpio_add_callback(button.port, &button_cb_data);
-    LOG_INF("Set up button at %s pin %d\n", button.port->name, button.pin);
-
-    /*
-    *
-    * General configuration to the led
-    *
-    */
-
-    if (led.port && !gpio_is_ready_dt(&led)) {
-		LOG_ERR("Error %d: LED device %s is not ready; ignoring it\n", ret, led.port->name);
-		return 0;
-	}
-
-    ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_LOW);
-    if (ret != 0) {
-        LOG_ERR("Error %d: failed to configure LED device %s pin %d\n", ret, led.port->name, led.pin);
-        return 0;
-    } 
-
-    while(true) {
-        if (mode){
-            k_msleep(CONFIG_BLINK_TIME);
-            gpio_pin_toggle_dt(&led);
-            continue;
-        }
-        set_led_brightness(brightness);
-
-        brightness += step;
-        if (brightness == 0 || brightness == 100) {
-            step = -step;
-        }
-
-        k_msleep(500);
-    }
-
+    struct sensor_data data;
+    k_msgq_get(&filter_output_msgq, &data, K_FOREVER);
     return 0;
-} 
+}
