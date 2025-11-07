@@ -1,143 +1,126 @@
+/* main.c
+ * Exemplo Zephyr: SNTP publisher usando ZBus; dois subscribers (logger + application).
+ * Compilar como parte de um projeto Zephyr com ZBus, SNTP e rede habilitados.
+ */
+
 #include <zephyr/kernel.h>
-#include <zephyr/sys/printk.h>
-#include <zephyr/device.h>
-#include <zephyr/drivers/pwm.h>
-#include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/zbus/zbus.h>
+#include <zephyr/net/sntp.h>
+#include <zephyr/sys/printk.h>
+#include <stdint.h>
 
-#include <stdlib.h>
-#include <time.h>
+LOG_MODULE_REGISTER(time_sync, LOG_LEVEL_INF);
 
-
-LOG_MODULE_REGISTER(main, CONFIG_MAIN_LOG_LEVEL);
-
-struct sensor_data
-{
-    int temperature;
-    int humidity;
+/* --- Estrutura da mensagem de tempo --- */
+struct time_msg {
+	uint64_t seconds;   /* segundos desde 1970-01-01 (Unix epoch) */
+	uint32_t fraction;  /* fração (32-bit) conforme sntp_time.fraction */
 };
 
-K_MSGQ_DEFINE(filter_input_msgq, sizeof(struct sensor_data), 10, 1);
-K_MSGQ_DEFINE(filter_output_msgq, sizeof(struct sensor_data), 10, 1);
+/* --- Observers / Subscribers --- */
+ZBUS_SUBSCRIBER_DEFINE(logger_sub, 4);
+ZBUS_SUBSCRIBER_DEFINE(application_sub, 4);
 
-/**
-* Simulate reading temperature and humidity from sensors.
-*/
-int read_temperature()
+/* --- Canal ZBus --- 
+ * args: name, type, validator, user_data, observers, init_val
+ */
+ZBUS_CHAN_DEFINE(time_channel,
+                 struct time_msg,
+                 NULL,
+                 NULL,
+                 ZBUS_OBSERVERS(logger_sub, application_sub),
+                 {0});
+
+/* Thread stacks / priorities */
+#define STACK_SIZE 1024
+#define PRIO 5
+
+/* Forward declarations de threads (K_THREAD_DEFINE) */
+void sntp_client_thread(void *a, void *b, void *c);
+void logger_thread(void *a, void *b, void *c);
+void application_thread(void *a, void *b, void *c);
+
+K_THREAD_DEFINE(sntp_tid, STACK_SIZE, sntp_client_thread, NULL, NULL, NULL,
+                PRIO, 0, 0);
+K_THREAD_DEFINE(logger_tid, STACK_SIZE, logger_thread, NULL, NULL, NULL,
+                PRIO, 0, 0);
+K_THREAD_DEFINE(app_tid, STACK_SIZE, application_thread, NULL, NULL, NULL,
+                PRIO, 0, 0);
+
+/* --- SNTP publisher thread --- */
+void sntp_client_thread(void *a, void *b, void *c)
 {
-    int value = 10.0 + (rand() % 100); 
-    return value;
+	struct sntp_time ts;
+	int rc;
+
+	/* Tempo entre sincronizações (ajustável) */
+	const k_timeout_t poll_interval = K_SECONDS(60);
+
+	while (1) {
+		/* Usamos a conveniência sntp_simple para uma consulta "one-shot". 
+		 * O endereço vem de prj.conf via Kconfig (CONFIG_SNTP_SERVER_ADDR).
+		 */
+		rc = sntp_simple(CONFIG_SNTP_SERVER_ADDR, 3000, &ts);
+		if (rc == 0) {
+			struct time_msg tm = {
+				.seconds = ts.seconds,
+				.fraction = ts.fraction
+			};
+
+			/* Publica no canal. Timeout curto para evitar bloqueio grande. */
+			rc = zbus_chan_pub(&time_channel, &tm, K_SECONDS(1));
+			if (rc == 0) {
+				LOG_INF("SNTP sync ok, published seconds=%llu", tm.seconds);
+			} else {
+				LOG_WRN("Falha ao publicar no time_channel (rc=%d)", rc);
+			}
+		} else {
+			LOG_WRN("SNTP query failed (rc=%d)", rc);
+		}
+
+		k_sleep(poll_interval);
+	}
 }
 
-/**
-* Simulate reading humidity from a sensor.
-*/
-int read_humidity()
+/* --- Logger subscriber --- */
+void logger_thread(void *a, void *b, void *c)
 {
-    int value =  10.0 + (rand() % 100); 
-    return value;
+	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+	const struct zbus_channel *chan = NULL;
+	struct time_msg msg;
+
+	LOG_INF("Logger thread pronto; aguardando notificações...");
+
+	while (1) {
+		/* Espera por nova mensagem e copia para 'msg' */
+		int rc = zbus_sub_wait_msg(&logger_sub, &chan, &msg, K_FOREVER);
+		if (rc == 0) {
+			/* Exibe log claro com o timestamp recebido */
+			LOG_INF("Logger recebeu tempo: seconds=%llu fraction=%u",
+			        msg.seconds, msg.fraction);
+		} else {
+			LOG_ERR("zbus_sub_wait_msg falhou (rc=%d)", rc);
+		}
+	}
 }
 
-/**
-* Threads for reading temperature sensors and filtering data.
-*/
-void temperature_sensor(void *p1, void *p2, void *p3)
+/* --- Application subscriber (simples confirmação) --- */
+void application_thread(void *a, void *b, void *c)
 {
-    struct sensor_data data;
-    while (1) {
-        LOG_DBG("Reading temperature sensor...");
-        data.temperature = read_temperature();
-        data.humidity = 0.0;
+	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+	const struct zbus_channel *chan = NULL;
+	struct time_msg msg;
 
-        while(k_msgq_put(&filter_input_msgq, &data, K_MSEC(100)) != 0) {
-            LOG_DBG("Filter input message queue full, dropping data");
-            k_msgq_purge(&filter_input_msgq);
-        }
+	LOG_INF("Application thread pronto; aguardando tempo...");
 
-        k_sleep(K_SECONDS(5));
-    }
+	while (1) {
+		int rc = zbus_sub_wait_msg(&application_sub, &chan, &msg, K_FOREVER);
+		if (rc == 0) {
+			/* Apenas confirma recebimento (poderia acionar RTC, timers, etc.) */
+			printk("Application: recebido tempo (sec=%llu)\n", msg.seconds);
+		} else {
+			LOG_ERR("zbus_sub_wait_msg (app) falhou (rc=%d)", rc);
+		}
+	}
 }
-
-/**
-* Threads for reading humidity sensors and filtering data.
-*/
-void humidity_sensor(void *p1, void *p2, void *p3)
-{
-    struct sensor_data data;
-    while (1) {
-        LOG_DBG("Reading humidity sensor...");
-        data.humidity = read_humidity();
-        data.temperature = 0.0;
-        
-        while(k_msgq_put(&filter_input_msgq, &data, K_MSEC(100)) != 0) {
-            LOG_DBG("Filter input message queue full, dropping data");
-            k_msgq_purge(&filter_input_msgq);
-        }
-        
-        k_sleep(K_SECONDS(1));
-    }
-}
-
-/**
-* Thread for filtering sensors data.
-*/
-void filter_data(void *p1, void *p2, void *p3)
-{
-    struct sensor_data data;
-    
-    while (1) {
-        LOG_DBG("Filtering data...");
-
-        k_msgq_get(&filter_input_msgq, &data, K_FOREVER);
-        
-        if(data.temperature == 0.0 && data.humidity == 0.0) {
-            LOG_WRN("Received data with no valid fields, dropping");
-            k_msgq_purge(&filter_input_msgq);
-            continue;
-        }
-        
-        if(data.temperature != 0.0) {
-            if(data.temperature <= 18 || data.temperature >= 30) {
-                LOG_WRN("Temperature out of range: %d", data.temperature);
-                continue;
-            }
-        }
-        
-        if(data.humidity != 0.0) {
-            if(data.humidity <= 40 || data.humidity >= 70) {
-                LOG_WRN("Humidity out of range: %d", data.humidity);
-                continue;
-            }
-        }
-        
-        while(k_msgq_put(&filter_output_msgq, &data, K_MSEC(100)) != 0) {
-            LOG_WRN("Filter output message queue full, dropping data");
-            k_msgq_purge(&filter_output_msgq);
-        }
-        
-        k_sleep(K_SECONDS(1));
-    }
-}
-
-
-int main(void)
-{
-    srand(time(NULL)); 
-    
-    struct sensor_data data;
-
-    while (1){
-        if (k_msgq_get(&filter_output_msgq, &data, K_FOREVER) != 0) {
-            LOG_ERR("Failed to get data from filter output message queue");
-            continue;
-        }
-        LOG_INF("Filtered Data - Temperature: %d, Humidity: %d", data.temperature, data.humidity);
-
-    }
-
-    return 0;
-}
-
-K_THREAD_DEFINE(temperature_sensor_id, 1024, temperature_sensor, NULL, NULL, NULL, 7, 0, 0);
-K_THREAD_DEFINE(humidity_sensor_id, 1024, humidity_sensor, NULL, NULL, NULL, 7, 0, 0);
-K_THREAD_DEFINE(filter_data_id, 1024, filter_data, NULL, NULL, NULL, 8, 0, 0);

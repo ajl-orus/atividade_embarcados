@@ -1,11 +1,10 @@
-menu "Zephyr"
-source "Kconfig.zephyr"
+menu "Time sync configuration"
+
+config SNTP_SERVER_ADDR
+    string "Endereço do servidor SNTP (addr[:port])"
+    default "pool.ntp.org"
+    help
+      Endereço usado por sntp_simple(). Pode ser um hostname (ex: pool.ntp.org)
+      ou IP com porta (ex: 192.168.1.10:123). Defina em prj.conf para sobrescrever.
+
 endmenu
-
-menu "ATIVIDADE3"
-
-endmenu
-
-module = MAIN
-module-str = main
-source "subsys/logging/Kconfig.template.log_config"
