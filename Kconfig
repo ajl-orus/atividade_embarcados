@@ -1,3 +1,7 @@
+menu "Zephyr"
+source "Kconfig.zephyr"
+endmenu
+
 menu "Time sync configuration"
 
 config SNTP_SERVER_ADDR
