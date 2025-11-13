@@ -10,5 +10,14 @@ config SNTP_SERVER_ADDR
     help
       Endereço usado por sntp_simple(). Pode ser um hostname (ex: pool.ntp.org)
       ou IP com porta (ex: 192.168.1.10:123). Defina em prj.conf para sobrescrever.
+endmenu
 
+menu "System varibles"
+  config STACK_SIZE
+    int "Tamanho da stack das threads"
+    default 1024
+
+    config PRIORITY
+      int "Prioridade da thread"
+      default 5
 endmenu

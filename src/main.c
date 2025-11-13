@@ -8,19 +8,19 @@
 #include <zephyr/zbus/zbus.h>
 #include <zephyr/net/sntp.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/net/net_mgmt.h>
+#include <zephyr/net/net_if.h>
 #include <stdint.h>
+#include <inttypes.h>   /* Para usar PRIu64 e PRIu32 */
+
+#include "aux.h"
 
 LOG_MODULE_REGISTER(time_sync, LOG_LEVEL_INF);
 
-/* --- Estrutura da mensagem de tempo --- */
-struct time_msg {
-	uint64_t seconds;   /* segundos desde 1970-01-01 (Unix epoch) */
-	uint32_t fraction;  /* fração (32-bit) conforme sntp_time.fraction */
-};
-
 /* --- Observers / Subscribers --- */
-ZBUS_SUBSCRIBER_DEFINE(logger_sub, 4);
-ZBUS_SUBSCRIBER_DEFINE(application_sub, 4);
+/* usar MSG subscriber (fila) já que usamos zbus_sub_wait_msg() */
+ZBUS_MSG_SUBSCRIBER_DEFINE(logger_sub);
+ZBUS_MSG_SUBSCRIBER_DEFINE(application_sub);
 
 /* --- Canal ZBus --- 
  * args: name, type, validator, user_data, observers, init_val
@@ -32,46 +32,62 @@ ZBUS_CHAN_DEFINE(time_channel,
                  ZBUS_OBSERVERS(logger_sub, application_sub),
                  {0});
 
-/* Thread stacks / priorities */
-#define STACK_SIZE 1024
-#define PRIO 5
+static struct k_sem net_ready;
+static struct net_mgmt_event_callback net_cb;
 
-/* Forward declarations de threads (K_THREAD_DEFINE) */
-void sntp_client_thread(void *a, void *b, void *c);
-void logger_thread(void *a, void *b, void *c);
-void application_thread(void *a, void *b, void *c);
+static void net_event_handler(struct net_mgmt_event_callback *cb,
+                              uint64_t mgmt_event, struct net_if *iface)
+{
+    ARG_UNUSED(cb);
+    ARG_UNUSED(iface);
 
-K_THREAD_DEFINE(sntp_tid, STACK_SIZE, sntp_client_thread, NULL, NULL, NULL,
-                PRIO, 0, 0);
-K_THREAD_DEFINE(logger_tid, STACK_SIZE, logger_thread, NULL, NULL, NULL,
-                PRIO, 0, 0);
-K_THREAD_DEFINE(app_tid, STACK_SIZE, application_thread, NULL, NULL, NULL,
-                PRIO, 0, 0);
+    if (mgmt_event == NET_EVENT_IPV4_ADDR_ADD) {
+        k_sem_give(&net_ready);
+    }
+}
 
 /* --- SNTP publisher thread --- */
 void sntp_client_thread(void *a, void *b, void *c)
 {
 	struct sntp_time ts;
 	int rc;
+	bool already_connected = false;
 
-	/* Tempo entre sincronizações (ajustável) */
-	const k_timeout_t poll_interval = K_SECONDS(60);
+	const k_timeout_t poll_interval = K_SECONDS(1);
+
+	/* aguarda um pouco antes de iniciar (boot) */
+	k_sleep(K_SECONDS(5));
+
+	/* inicializa mecanismo que espera a interface IPv4 */
+	k_sem_init(&net_ready, 0, 1);
+	net_mgmt_init_event_callback(&net_cb, net_event_handler, NET_EVENT_IPV4_ADDR_ADD);
+	net_mgmt_add_event_callback(&net_cb);
+
+	#if defined(CONFIG_NET_LOOPBACK) || defined(CONFIG_NET_NATIVE)
+    	k_sem_give(&net_ready);
+    	LOG_WRN("Rede simulada: semáforo liberado manualmente");
+	#endif
 
 	while (1) {
-		/* Usamos a conveniência sntp_simple para uma consulta "one-shot". 
-		 * O endereço vem de prj.conf via Kconfig (CONFIG_SNTP_SERVER_ADDR).
-		 */
-		rc = sntp_simple(CONFIG_SNTP_SERVER_ADDR, 3000, &ts);
+		if (!k_sem_take(&net_ready, K_SECONDS(5)) != 0 || !already_connected) {
+			LOG_INF("Aguardando interface rede...");
+			already_connected = true;
+			continue;
+		}
+
+		LOG_DBG("Tentando sntp_simple...");
+		rc = sntp_simple(CONFIG_SNTP_SERVER_ADDR, 5000, &ts);
+		LOG_DBG("sntp_simple rc=%d", rc);
+
 		if (rc == 0) {
 			struct time_msg tm = {
 				.seconds = ts.seconds,
 				.fraction = ts.fraction
 			};
 
-			/* Publica no canal. Timeout curto para evitar bloqueio grande. */
 			rc = zbus_chan_pub(&time_channel, &tm, K_SECONDS(1));
 			if (rc == 0) {
-				LOG_INF("SNTP sync ok, published seconds=%llu", tm.seconds);
+				LOG_INF("SNTP sync ok, published seconds=%" PRIu64, tm.seconds);
 			} else {
 				LOG_WRN("Falha ao publicar no time_channel (rc=%d)", rc);
 			}
@@ -93,11 +109,9 @@ void logger_thread(void *a, void *b, void *c)
 	LOG_INF("Logger thread pronto; aguardando notificações...");
 
 	while (1) {
-		/* Espera por nova mensagem e copia para 'msg' */
 		int rc = zbus_sub_wait_msg(&logger_sub, &chan, &msg, K_FOREVER);
 		if (rc == 0) {
-			/* Exibe log claro com o timestamp recebido */
-			LOG_INF("Logger recebeu tempo: seconds=%llu fraction=%u",
+			LOG_INF("Logger recebeu tempo: seconds=%" PRIu64 " fraction=%" PRIu32,
 			        msg.seconds, msg.fraction);
 		} else {
 			LOG_ERR("zbus_sub_wait_msg falhou (rc=%d)", rc);
@@ -105,7 +119,7 @@ void logger_thread(void *a, void *b, void *c)
 	}
 }
 
-/* --- Application subscriber (simples confirmação) --- */
+/* --- Application subscriber --- */
 void application_thread(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
@@ -117,10 +131,17 @@ void application_thread(void *a, void *b, void *c)
 	while (1) {
 		int rc = zbus_sub_wait_msg(&application_sub, &chan, &msg, K_FOREVER);
 		if (rc == 0) {
-			/* Apenas confirma recebimento (poderia acionar RTC, timers, etc.) */
-			printk("Application: recebido tempo (sec=%llu)\n", msg.seconds);
+			printk("Application: recebido tempo (sec=%" PRIu64 ")\n", msg.seconds);
 		} else {
 			LOG_ERR("zbus_sub_wait_msg (app) falhou (rc=%d)", rc);
 		}
 	}
 }
+
+/* --- Definição das threads --- */
+K_THREAD_DEFINE(sntp_tid, CONFIG_STACK_SIZE, sntp_client_thread, NULL, NULL, NULL,
+                CONFIG_PRIORITY, 0, 0);
+K_THREAD_DEFINE(logger_tid, CONFIG_STACK_SIZE, logger_thread, NULL, NULL, NULL,
+                CONFIG_PRIORITY + 3, 0, 0);
+K_THREAD_DEFINE(app_tid, CONFIG_STACK_SIZE, application_thread, NULL, NULL, NULL,
+                CONFIG_PRIORITY + 5, 0, 0);
