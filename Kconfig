@@ -1,3 +1,170 @@
-menu "Zephyr"
+# Kconfig - Radar Eletrônico com Classificação
+# Copyright (c) 2024, Seu Nome
+# SPDX-License-Identifier: Apache-2.0
+
+mainmenu "Radar Eletrônico com Classificação"
+
+menu "Configurações do Radar Eletrônico"
+
+config RADAR_SENSOR_DISTANCE_MM
+    int "Distância entre os sensores em milímetros"
+    range 100 2000
+    default 500
+    help
+        Define a distância física entre os dois sensores magnéticos
+        utilizados para cálculo de velocidade.
+        Valor típico: 500mm (50cm)
+
+config RADAR_SPEED_LIMIT_LIGHT_KMH
+    int "Limite de velocidade para veículos leves (km/h)"
+    range 40 120
+    default 80
+    help
+        Velocidade máxima permitida para veículos leves (até 2 eixos).
+        Acima deste valor é considerada infração.
+
+config RADAR_SPEED_LIMIT_HEAVY_KMH
+    int "Limite de velocidade para veículos pesados (km/h)"
+    range 30 100
+    default 60
+    help
+        Velocidade máxima permitida para veículos pesados (3+ eixos).
+        Acima deste valor é considerada infração.
+
+config RADAR_WARNING_THRESHOLD_PERCENT
+    int "Percentual do limite para alerta amarelo"
+    range 70 99
+    default 90
+    help
+        Percentual do limite de velocidade que ativa o display amarelo
+        de alerta. Ex: 90 = alerta ao atingir 90% do limite.
+
+config RADAR_CAMERA_FAILURE_RATE_PERCENT
+    int "Taxa de falha da câmera simulada (%)"
+    range 0 100
+    default 10
+    help
+        Porcentagem de chance da câmera simular uma falha na captura
+        da placa (0-100%).
+
+config RADAR_DEBOUNCE_TIME_MS
+    int "Tempo de debounce para sensores (ms)"
+    range 10 100
+    default 50
+    help
+        Tempo mínimo entre pulsos dos sensores para evitar bouncing.
+        Valor em milissegundos.
+
+config RADAR_DISPLAY_UPDATE_INTERVAL_MS
+    int "Intervalo de atualização do display (ms)"
+    range 100 5000
+    default 500
+    help
+        Intervalo entre atualizações do display virtual.
+        Valor em milissegundos.
+
+config RADAR_CAMERA_PROCESSING_TIME_MS
+    int "Tempo de processamento da câmera (ms)"
+    range 100 2000
+    default 500
+    help
+        Tempo que a câmera simulada leva para processar a placa.
+        Valor em milissegundos.
+
+menu "Configurações de Log e Debug"
+
+config RADAR_DEBUG_ENABLED
+    bool "Habilitar modo debug"
+    default n
+    help
+        Habilita mensagens de debug detalhadas no console.
+
+config RADAR_LOG_LEVEL
+    int "Nível de log do sistema"
+    range 0 4
+    default 2
+    help
+        0: Off, 1: Error, 2: Warning, 3: Info, 4: Debug
+
+config RADAR_SENSOR_SIMULATION
+    bool "Habilitar simulação de sensores"
+    default y
+    help
+        Habilita a geração automática de eventos de sensor
+        para testes sem hardware.
+
+config RADAR_SIMULATION_INTERVAL_MS
+    int "Intervalo da simulação de sensores (ms)"
+    depends on RADAR_SENSOR_SIMULATION
+    range 1000 10000
+    default 3000
+    help
+        Intervalo entre eventos simulados dos sensores.
+        Valor em milissegundos.
+
+endmenu
+
+menu "Configurações Avançadas"
+
+config RADAR_MAX_VEHICLE_QUEUE_SIZE
+    int "Tamanho máximo da fila de veículos"
+    range 5 50
+    default 10
+    help
+        Número máximo de veículos que podem estar na fila
+        de processamento simultaneamente.
+
+config RADAR_AXLE_TIMEOUT_MS
+    int "Timeout para contagem de eixos (ms)"
+    range 500 5000
+    default 2000
+    help
+        Tempo máximo para considerar que um veículo passou
+        completamente pelos sensores.
+
+config RADAR_PLATE_VALIDATION_STRICT
+    bool "Validação rigorosa de placas Mercosul"
+    default y
+    help
+        Habilita validação completa do formato Mercosul
+        para placas de veículos.
+
+choice
+    prompt "Estratégia de classificação de veículos"
+    default RADAR_CLASSIFICATION_AXLE_COUNT
+
+config RADAR_CLASSIFICATION_AXLE_COUNT
+    bool "Classificação por contagem de eixos"
+    help
+        Classifica veículos baseado apenas na contagem de eixos:
+        - 2 eixos: Veículo leve
+        - 3+ eixos: Veículo pesado
+
+config RADAR_CLASSIFICATION_TIME_BASED
+    bool "Classificação por tempo entre eixos"
+    help
+        Classifica veículos baseado no tempo entre os eixos:
+        - Tempo curto: Veículo pesado (mais eixos)
+        - Tempo longo: Veículo leve
+
+endchoice
+
+config RADAR_SPEED_CALIBRATION_FACTOR
+    int "Fator de calibração de velocidade"
+    range 80 120
+    default 100
+    help
+        Fator de correção para cálculo de velocidade (em porcentagem).
+        Ajuste fino para compensações do sistema.
+
+endmenu
+
+endmenu
+
+module = RADAR
+module-str = Radar Eletrônico
+source "subsys/logging/Kconfig.template.log_config"
+
+menu "Zephyr Kernel"
 source "Kconfig.zephyr"
 endmenu
